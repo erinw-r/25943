@@ -1,107 +1,156 @@
+#define _XOPEN_SOURCE 600
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <ulimit.h>
+#include <sys/types.h>
+#include <sys/resource.h>
 
-#ifdef _WIN32
-  #include <unistd.h>
-#else
-  #include <unistd.h>
-  #include <sys/types.h>
-  #include <sys/resource.h>
-#endif
+extern char **environ;
 
-#define MAX_OPTS 100
+int main(int argc, char *argv[])
+{
+    char valid_options[] = "ispuU:cC:dvV:";
+    int saved_options[100];
+    char *saved_arguments[100];
 
-typedef struct {
-    char opt;
-    char *arg;
-} OptionCmd;
+    int c;
+    int count = 0;
+    int i;
+    int j;
+    int status = 0;
 
-int main(int argc, char *argv[]) {
-    int opt;
-    OptionCmd stack[MAX_OPTS];
-    int opt_count = 0;
+    long value;
+    char *end;
+    char directory[1024];
+    struct rlimit limit;
 
     opterr = 0;
 
-    while ((opt = getopt(argc, argv, "ispuU:cC:dV:")) != -1) {
-        if (opt == '?') {
-            fprintf(stderr, "Ошибка: Недопустимая опция или пропущен аргумент '-%c'\n", optopt);
-            return EXIT_FAILURE;
+    
+     //Сначала только запоминаем опции.
+     
+    while ((c = getopt(argc, argv, valid_options)) != -1) {
+        if (c == '?') {
+            printf("Недопустимая опция: -%c\n", optopt);
+            return 1;
         }
-        
-        if (opt_count < MAX_OPTS) {
-            stack[opt_count].opt = opt;
-            stack[opt_count].arg = optarg ? strdup(optarg) : NULL;
-            opt_count++;
-        } else {
-            fprintf(stderr, "Превышено максимальное количество опций\n");
+
+        if (count == 100) {
+            printf("Слишком много опций\n");
+            return 1;
+        }
+
+        saved_options[count] = c;
+        saved_arguments[count] = optarg;
+        count++;
+    }
+
+    
+     // Выполняем опции справа налево.
+     
+    for (i = count - 1; i >= 0; i--) {
+        switch (saved_options[i]) {
+        case 'i':
+            printf("Real UID: %ld\n", (long)getuid());
+            printf("Effective UID: %ld\n", (long)geteuid());
+            printf("Real GID: %ld\n", (long)getgid());
+            printf("Effective GID: %ld\n", (long)getegid());
+            break;
+
+        case 's':
+            if (setpgid(0, 0) == -1) {
+                perror("setpgid");
+                status = 1;
+            }
+            break;
+
+        case 'p':
+            printf("PID: %ld\n", (long)getpid());
+            printf("PPID: %ld\n", (long)getppid());
+            printf("PGRP: %ld\n", (long)getpgrp());
+            break;
+
+        case 'u':
+            printf("ulimit: %ld\n", ulimit(UL_GETFSIZE));
+            break;
+
+        case 'U':
+            value = strtol(saved_arguments[i], &end, 10);
+
+            if (saved_arguments[i][0] == '\0' ||
+                *end != '\0' ||
+                value < 0) {
+                printf("Неудачное значение для -U: %s\n",
+                    saved_arguments[i]);
+                status = 1;
+            } else if (ulimit(UL_SETFSIZE, value) == -1) {
+                perror("ulimit");
+                status = 1;
+            }
+            break;
+
+        case 'c':
+            if (getrlimit(RLIMIT_CORE, &limit) == -1) {
+                perror("getrlimit");
+                status = 1;
+            } else if (limit.rlim_cur == RLIM_INFINITY) {
+                printf("Core size: unlimited\n");
+            } else {
+                printf("Core size: %lu bytes\n",
+                    (unsigned long)limit.rlim_cur);
+            }
+            break;
+
+        case 'C':
+            value = strtol(saved_arguments[i], &end, 10);
+
+            if (saved_arguments[i][0] == '\0' ||
+                *end != '\0' ||
+                value < 0) {
+                printf("Неудачное значение для -C: %s\n",
+                    saved_arguments[i]);
+                status = 1;
+            } else if (getrlimit(RLIMIT_CORE, &limit) == -1) {
+                perror("getrlimit");
+                status = 1;
+            } else {
+                limit.rlim_cur = (rlim_t)value;
+
+                if (setrlimit(RLIMIT_CORE, &limit) == -1) {
+                    perror("setrlimit");
+                    status = 1;
+                }
+            }
+            break;
+
+        case 'd':
+            if (getcwd(directory, sizeof(directory)) == NULL) {
+                perror("getcwd");
+                status = 1;
+            } else {
+                printf("%s\n", directory);
+            }
+            break;
+
+        case 'v':
+            for (j = 0; environ[j] != NULL; j++)
+                printf("%s\n", environ[j]);
+            break;
+
+        case 'V':
+            if (strchr(saved_arguments[i], '=') == NULL) {
+                printf("После -V требуется name=value\n");
+                status = 1;
+            } else if (putenv(saved_arguments[i]) != 0) {
+                perror("putenv");
+                status = 1;
+            }
             break;
         }
     }
 
-    if (argc == 1) {
-        printf("Программа запущена без аргументов.\n");
-        return EXIT_SUCCESS;
-    }
-
-    printf("--- Обработка опций в порядке справа налево ---\n");
-
-    for (int i = opt_count - 1; i >= 0; i--) {
-        char current_opt = stack[i].opt;
-        char *current_arg = stack[i].arg;
-
-        switch (current_opt) {
-            case 'i':
-                printf("[-i] Запрос реальных и эффективных UID/GID (Доступно в полной мере на POSIX/Linux)\n");
-                break;
-            case 's':
-                printf("[-s] Запрос: стать лидером группы процессов\n");
-                break;
-            case 'p':
-                printf("[-p] Запрос идентификаторов процесса (PID, PPID, PGID)\n");
-                break;
-            case 'u':
-                printf("[-u] Запрос значения ulimit\n");
-                break;
-            case 'U':
-                {
-                    long new_ul = atol(current_arg);
-                    if (new_ul <= 0) {
-                        fprintf(stderr, "[-U] Ошибка: Неудачное значение для ulimit: %s\n", current_arg);
-                    } else {
-                        printf("[-U] Запрос на изменение ulimit на %ld\n", new_ul);
-                    }
-                }
-                break;
-            case 'c':
-                printf("[-c] Запрос размера core-файла\n");
-                break;
-            case 'C':
-                printf("[-C] Изменение размера core-файла на: %s\n", current_arg);
-                break;
-            case 'd':
-                {
-                    char cwd[1024];
-                    if (getcwd(cwd, sizeof(cwd)) != NULL) {
-                        printf("[-d] Текущая директория: %s\n", cwd);
-                    } else {
-                        perror("[-d] Ошибка getcwd");
-                    }
-                }
-                break;
-            case 'v':
-                printf("[-v] Распечатка переменных среды окружения\n");
-                break;
-            case 'V':
-                printf("[-V] Внесение/изменение переменной среды: %s\n", current_arg);
-                break;
-        }
-
-        if (current_arg) {
-            free(current_arg);
-        }
-    }
-
-    return EXIT_SUCCESS;
+    return status;
 }
