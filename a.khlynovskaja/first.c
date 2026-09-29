@@ -74,8 +74,14 @@ int main(int argc, char *argv[])
             break;
 
         case 'u':
-            printf("ulimit: %ld\n", ulimit(UL_GETFSIZE));
+            value = ulimit(UL_GETFSIZE);
+            if (value >= 1000000000000000LL || value == -1) {
+                printf("ulimit: unlimited\n");
+            } else {
+                printf("ulimit: %ld\n", value);
+            }
             break;
+
 
         case 'U':
             value = strtol(saved_arguments[i], &end, 10);
