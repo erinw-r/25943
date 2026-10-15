@@ -1,6 +1,6 @@
 all: res
 
-res: task6.c
+res: 6.c
 	gcc -Wall -Wextra -Wpedantic -g 6.c -o res
 
 run: res
