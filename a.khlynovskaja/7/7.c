@@ -18,14 +18,12 @@ int fd;
 char *file_data;
 off_t file_size;
 
-// Обработчик Ctrl+C
 void handle_sigint(int sig)
 {
     (void)sig;
     printf("\nНажато Ctrl+C. Программа продолжает работу.\n");
 }
 
-// обработчик таймаута (5 секунд вышло)
 void handle_sigalrm(int sig)
 {
     (void)sig;
@@ -44,7 +42,6 @@ int main(int argc, char *argv[])
     int cnt = 0;
     off_t line_start = 0;
 
-    // регистрация сигналов
     signal(SIGINT, handle_sigint);
     signal(SIGALRM, handle_sigalrm);
 
@@ -85,7 +82,6 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // построение таблицы отступов
     for (off_t i = 0; i < file_size; i++)
     {
         if (file_data[i] == '\n')
@@ -100,7 +96,6 @@ int main(int argc, char *argv[])
         }
     }
 
-    // учет последней строки, если она не заканчивается на отступ
     if (line_start < file_size && cnt < MAX_LINES)
     {
         lines[cnt].offset = line_start;
@@ -119,36 +114,31 @@ int main(int argc, char *argv[])
         );
     }
 
-    // цикл запроса строк
-    while (1)
+    long number;
+    printf("\nВведите номер строки (у вас есть 5 секунд): ");
+    fflush(stdout);
+    
+    // Заводим будильник ОДИН раз
+    alarm(5);
+
+    if (scanf("%ld", &number) != 1)
     {
-        long number;
-        printf("\nВведите номер строки (0 - выход, у вас 5 секунд): ");
-        fflush(stdout);
-        alarm(5);
+        alarm(0); // Отключаем будильник, если ввели не число
+        printf("Ошибка: введите целое число!\n");
+        munmap(file_data, file_size);
+        close(fd);
+        return 1;
+    }
 
-        if (scanf("%ld", &number) != 1)
-        {
-            printf("Ошибка: введите целое число!\n");
-            int c;
-            while ((c = getchar()) != '\n' && c != EOF); 
-            alarm(0); 
-            continue;
-        }
+    // Успели ввести вовремя -> ТУШИМ БУДИЛЬНИК НАВСЕГДА
+    alarm(0);
 
-        alarm(0);
-
-        if (number == 0)
-        {
-            break;
-        }
-
-        if (number < 1 || number > cnt)
-        {
-            printf("Строки с таким номером не существует. Доступно: 1..%d\n", cnt);
-            continue;
-        }
-
+    if (number < 1 || number > cnt)
+    {
+        printf("Строки с таким номером не существует. Доступно: 1..%d\n", cnt);
+    }
+    else 
+    {
         printf("Строка %ld: %.*s", 
                number, 
                (int)lines[number - 1].length, 
@@ -160,6 +150,7 @@ int main(int argc, char *argv[])
         }
     }
 
+    // Все, программа сделала один запрос и завершается
     munmap(file_data, file_size);
     close(fd);
     return 0;
