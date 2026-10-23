@@ -1,3 +1,5 @@
+#define _XOPEN_SOURCE 600
+
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -115,22 +117,22 @@ int main(int argc, char *argv[])
     }
 
     long number;
-    printf("\nВведите номер строки (у вас есть 5 секунд): ");
+    printf("\nВведите номер строки (у вас 5 секунд): ");
     fflush(stdout);
     
-    // Заводим будильник ОДИН раз
+    // Заводим таймер ровно ОДИН раз перед вводом
     alarm(5);
 
     if (scanf("%ld", &number) != 1)
     {
-        alarm(0); // Отключаем будильник, если ввели не число
+        alarm(0); // Гасим будильник, если ввели некорректные символы
         printf("Ошибка: введите целое число!\n");
         munmap(file_data, file_size);
         close(fd);
         return 1;
     }
 
-    // Успели ввести вовремя -> ТУШИМ БУДИЛЬНИК НАВСЕГДА
+    // Пользователь успел набрать число и нажать Enter -> УБИВАЕМ БУДИЛЬНИК НАВСЕГДА
     alarm(0);
 
     if (number < 1 || number > cnt)
@@ -150,7 +152,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Все, программа сделала один запрос и завершается
+    // Программа сделала один единственный запрос и успешно завершает работу
     munmap(file_data, file_size);
     close(fd);
     return 0;
