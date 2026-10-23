@@ -1,204 +1,232 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <fcntl.h>
 #include <unistd.h>
-#include <sys/types.h>
-#include <sys/select.h> 
-#include <string.h>
+#include <fcntl.h>
+#include <signal.h>
 
-#define BUF_SIZE 1
+#define INITIAL_CAPACITY 16
+#define BUFFER_SIZE 256
 
-struct line_info {
+// структура для хранения указателя на начало строки и ее длины
+typedef struct {
     off_t offset;
-    off_t length;
-};
+    size_t length;  // длина строки в байтах
+} LineInfo;
 
-// для вывода содержимого файла при таймауте
-void print_all_file(int fd)
+// глобальная переменная для доступа из обработчика сигнала
+int global_fd = -1;
+
+// обработчик сигнала SIGALRM (вызывается через 5 секунд неактивности при первом вводе)
+void handle_alarm(int sig) 
 {
-    printf("\nВремя вышло (5 секунд)! Выводим всё содержимое файла:\n\n");
+    (void)sig;
     
-    //сбрасываем указатель файла на самое начало
-    if (lseek(fd, 0L, SEEK_SET) == (off_t)-1)
+    printf("\n\nВремя на первый ввод истекло (5 секунд)!\n");
+    printf("=== Распечатка всего содержимого файла ===\n");
+
+    if (global_fd != -1) 
     {
-        perror("Ошибка lseek при сбросе файла");
-        return;
+        // возвращаемся в начало файла
+        lseek(global_fd, 0, SEEK_SET);
+
+        char buffer[BUFFER_SIZE];
+        ssize_t bytes_read;
+        while ((bytes_read = read(global_fd, buffer, sizeof(buffer))) > 0) 
+        {
+            write(STDOUT_FILENO, buffer, bytes_read);
+        }
     }
 
-    char buf[128];
-    ssize_t n;
-    while ((n = read(fd, buf, sizeof(buf))) > 0)
-    {
-        write(STDOUT_FILENO, buf, n);
-    }
-    printf("\n");
+    printf("\n==========================================\n");
+    exit(EXIT_SUCCESS);
 }
 
-int main(int argc, char *argv[])
+int main(int argc, char *argv[]) 
 {
-    if (argc != 2)
+    if (argc < 2) 
     {
-        printf("Использование: %s <имя_файла>\n", argv[0]);
-        return 1;
+        fprintf(stderr, "Использование: %s <имя_файла>\n", argv[0]);
+        return EXIT_FAILURE;
     }
 
     int fd = open(argv[1], O_RDONLY);
-    if (fd == -1)
+    if (fd == -1) 
     {
         perror("Ошибка открытия файла");
-        return 1;
+        return EXIT_FAILURE;
     }
 
-    struct line_info *table = NULL;
-    size_t count = 0;
-    size_t capacity = 0;
-    off_t line_start = 0;
-    char buf[BUF_SIZE];
-    ssize_t n;
+    global_fd = fd;
 
-    // построение таблицы
-    while ((n = read(fd, buf, BUF_SIZE)) > 0)
+    // настраиваем обработчик сигнала SIGALRM
+    struct sigaction sa;
+    sa.sa_handler = handle_alarm;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0; // не используем SA_RESTART, чтобы прервать блокирующий scanf
+    if (sigaction(SIGALRM, &sa, NULL) == -1) 
     {
-        off_t current_pos = lseek(fd, 0L, SEEK_CUR);
+        perror("Ошибка установки обработчика сигнала");
+        close(fd);
+        return EXIT_FAILURE;
+    }
 
-        if (buf[0] == '\n')
+    // динамический массив для таблицы строк
+    size_t capacity = INITIAL_CAPACITY;
+    size_t line_count = 0;
+    LineInfo *table = malloc(capacity * sizeof(LineInfo));
+    if (!table) 
+    {
+        perror("Ошибка выделения памяти");
+        close(fd);
+        return EXIT_FAILURE;
+    }
+
+    table[0].offset = 0;
+    table[0].length = 0;
+
+    char buffer[BUFFER_SIZE];
+    ssize_t bytes_read;
+
+    // считываем файл и строим таблицу отступов и длин
+    while ((bytes_read = read(fd, buffer, sizeof(buffer))) > 0) 
+    {
+        for (ssize_t i = 0; i < bytes_read; i++) 
         {
-            off_t length = current_pos - line_start;
+            table[line_count].length++;
 
-            if (count == capacity)
+            if (buffer[i] == '\n') 
             {
-                capacity = capacity ? capacity * 2 : 16;
-                struct line_info *tmp = (struct line_info *)realloc(table, capacity * sizeof(*table));
-                if (!tmp)
-                {
-                    perror("Ошибка realloc");
-                    close(fd);
-                    free(table);
-                    return 1;
-                }
-                table = tmp;
-            }
+                off_t current_pos = lseek(fd, 0L, SEEK_CUR) - bytes_read + i + 1;
+                line_count++;
 
-            table[count].offset = line_start;
-            table[count].length = length;
-            count++;
-            line_start = current_pos;
+                if (line_count >= capacity) 
+                {
+                    capacity *= 2;
+                    LineInfo *temp = realloc(table, capacity * sizeof(LineInfo));
+                    if (!temp) 
+                    {
+                        perror("Ошибка перераспределения памяти");
+                        free(table);
+                        close(fd);
+                        return EXIT_FAILURE;
+                    }
+                    table = temp;
+                }
+
+                table[line_count].offset = current_pos;
+                table[line_count].length = 0;
+            }
         }
     }
 
-    if (n < 0)
+    if (bytes_read == -1) 
     {
         perror("Ошибка чтения файла");
-        close(fd);
         free(table);
-        return 1;
+        close(fd);
+        return EXIT_FAILURE;
     }
 
-    off_t file_end = lseek(fd, 0L, SEEK_CUR);
-    if (file_end > line_start)
+    if (table[line_count].length > 0) 
     {
-        if (count == capacity)
+        line_count++;
+    }
+
+    // отладочный вывод таблицы
+    printf("=== Таблица отступов и длин строк ===\n");
+    printf("%-8s | %-12s | %-10s\n", "Строка", "Смещение (B)", "Длина (B)");
+    printf("-------------------------------------\n");
+    for (size_t i = 0; i < line_count; i++) 
+    {
+        printf("%-8zu | %-12ld | %-10zu\n", i + 1, (long)table[i].offset, table[i].length);
+    }
+    printf("=====================================\n\n");
+
+    // цикл запроса (5 секунд только на первый ввод)
+    int line_num;
+    int first_input = 1; // флаг первого ввода
+
+    // запускаем таймер на 5 секунд строго один раз перед первым запросом
+    alarm(5);
+
+    while (1) 
+    {
+        if (first_input) 
         {
-            capacity = capacity ? capacity * 2 : 16;
-            struct line_info *tmp = (struct line_info *)realloc(table, capacity * sizeof(*table));
-            if (!tmp)
-            {
-                perror("Ошибка realloc");
-                close(fd);
-                free(table);
-                return 1;
-            }
-            table = tmp;
+            printf("У вас есть 5 секунд на первый ввод номера строки (1-%zu, 0 для выхода): ", line_count);
+        } 
+        else 
+        {
+            printf("Введите номер строки (1-%zu, 0 для выхода): ", line_count);
         }
-        table[count].offset = line_start;
-        table[count].length = file_end - line_start;
-        count++;
-    }
-
-    printf("Таблица строк файла построена (всего строк: %zu).\n", count);
-
-    // цикл с ограничением по времени
-    long num;
-    while (1)
-    {
-        printf("\nВведите номер строки (0 для выхода, у вас есть 5 секунд): ");
         fflush(stdout);
 
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(STDIN_FILENO, &rfds);
+        int result = scanf("%d", &line_num);
 
-        struct timeval tv;
-        tv.tv_sec = 5;
-        tv.tv_usec = 0;
-
-        // ждем пока появятся данные или истечет таймер
-        int retval = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
-
-        if (retval == -1)
+        // снимаем таймер сразу после первого ввода (успешного или нет)
+        if (first_input) 
         {
-            perror("Ошибка вызова select()");
+            alarm(0);
+            first_input = 0;
+        }
+
+        if (result != 1) 
+        {
+            printf("Некорректный ввод. Попробуйте еще раз.\n");
+            while (getchar() != '\n');
+            continue;
+        }
+
+        if (line_num == 0) 
+        {
+            printf("Завершение работы.\n");
             break;
         }
-        else if (retval == 0)
-        {
-            print_all_file(fd);
-            break; 
-        }
 
-        if (scanf("%ld", &num) != 1)
+        if (line_num < 1 || (size_t)line_num > line_count) 
         {
-            printf("Ошибка, введите целое число\n");
-            int c;
-            while ((c = getchar()) != '\n' && c != EOF); // Очистка буфера
+            printf("Ошибка: строки с номером %d не существует.\n", line_num);
             continue;
         }
 
-        if (num == 0) 
+        size_t idx = line_num - 1;
+        off_t target_offset = table[idx].offset;
+        size_t target_len = table[idx].length;
+
+        if (lseek(fd, target_offset, SEEK_SET) == (off_t)-1) 
+        {
+            perror("Ошибка позиционирования (lseek)");
             break;
-
-        if (num < 1 || (size_t)num > count)
-        {
-            printf("Строка с таким номером не существует. Допустимо: 1..%zu\n", count);
-            continue;
         }
 
-        size_t idx = (size_t)num - 1;
-        struct line_info li = table[idx];
-
-        if (lseek(fd, li.offset, SEEK_SET) == (off_t)-1)
+        char *line_buf = malloc(target_len + 1);
+        if (!line_buf) 
         {
-            perror("Ошибка вызова lseek");
-            continue;
+            perror("Ошибка выделения памяти");
+            break;
         }
 
-        char *out = (char *)malloc(li.length + 1);
-        if (!out)
-        {
-            perror("Ошибка malloc");
-            continue;
-        }
-
-        ssize_t got = read(fd, out, li.length);
-        if (got < 0)
+        ssize_t read_bytes = read(fd, line_buf, target_len);
+        if (read_bytes == -1) 
         {
             perror("Ошибка чтения строки");
-            free(out);
-            continue;
+            free(line_buf);
+            break;
         }
 
-        out[got] = '\0';
-        printf("Строка %ld: %s", num, out);
+        line_buf[read_bytes] = '\0';
 
-        if (got > 0 && out[got - 1] != '\n')
+        printf("Строка %d: %s", line_num, line_buf);
+        if (read_bytes > 0 && line_buf[read_bytes - 1] != '\n') 
         {
             printf("\n");
         }
 
-        free(out);
+        free(line_buf);
     }
 
     free(table);
     close(fd);
-    return 0;
+
+    return EXIT_SUCCESS;
 }
