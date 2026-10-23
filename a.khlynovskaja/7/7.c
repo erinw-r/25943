@@ -1,159 +1,225 @@
-#define _XOPEN_SOURCE 600
-
 #include <stdio.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
 #include <signal.h>
-#include <ctype.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 
-#define MAX_LINES 1000
+#define INITIAL_CAPACITY 16
 
+// структура для хранения указателя на начало строки и ее длины
 typedef struct {
-    off_t offset;
-    off_t length;
-} Line;
+    const char *line_start; // указатель на начало строки в отображенной памяти
+    size_t length;          // длина строки в байтах
+} LineInfo;
 
-int fd;
-char *file_data;
-off_t file_size;
+// глобальные переменные для доступа из обработчика сигнала
+const char *global_file_map = NULL;
+size_t global_file_size = 0;
 
-void handle_sigint(int sig)
+// обработчик сигнала SIGALRM (вызывается при таймауте 5 секунд)
+void handle_alarm(int sig) 
 {
     (void)sig;
-    printf("\nНажато Ctrl+C. Программа продолжает работу.\n");
-}
+    
+    printf("\n\nВремя на первый ввод истекло (5 секунд)!\n");
+    printf("=== Распечатка всего содержимого файла ===\n");
 
-void handle_sigalrm(int sig)
-{
-    (void)sig;
-    printf("\nВремя вышло (5 секунд)!\n");
-    printf("Содержимое файла:\n");
-    printf("%.*s\n", (int)file_size, file_data);
-
-    munmap(file_data, file_size);
-    close(fd);
-    exit(0);
-}
-
-int main(int argc, char *argv[])
-{
-    Line lines[MAX_LINES];
-    int cnt = 0;
-    off_t line_start = 0;
-
-    signal(SIGINT, handle_sigint);
-    signal(SIGALRM, handle_sigalrm);
-
-    if (argc != 2)
+    if (global_file_map != NULL && global_file_size > 0) 
     {
-        printf("Использование: %s <имя_файла>\n", argv[0]);
-        return 1;
+        // выводим весь отображенный файл из памяти
+        fwrite(global_file_map, 1, global_file_size, stdout);
+        fflush(stdout);
     }
 
-    fd = open(argv[1], O_RDONLY);
-    if (fd == -1)
+    printf("\n==========================================\n");
+    exit(EXIT_SUCCESS);
+}
+
+int main(int argc, char *argv[]) 
+{
+    if (argc < 2) 
     {
-        perror("Ошибка open");
-        return 1;
+        fprintf(stderr, "Использование: %s <имя_файла>\n", argv[0]);
+        return EXIT_FAILURE;
     }
 
+    int fd = open(argv[1], O_RDONLY);
+    if (fd == -1) 
+    {
+        perror("Ошибка открытия файла");
+        return EXIT_FAILURE;
+    }
+
+    // получаем размер файла с помощью fstat(2)
     struct stat st;
-    if (fstat(fd, &st) == -1)
+    if (fstat(fd, &st) == -1) 
     {
-        perror("Ошибка fstat");
+        perror("Ошибка получения информации о файле (fstat)");
         close(fd);
-        return 1;
+        return EXIT_FAILURE;
     }
 
-    file_size = st.st_size;
-    if (file_size == 0)
+    // обработка пустого файла
+    if (st.st_size == 0) 
     {
         printf("Файл пуст.\n");
         close(fd);
-        return 0;
+        return EXIT_SUCCESS;
     }
 
-    file_data = (char *)mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (file_data == MAP_FAILED)
+    // отображаем файл в память (mmap)
+    char *file_map = mmap(NULL, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    if (file_map == MAP_FAILED) 
     {
-        perror("Ошибка mmap");
+        perror("Ошибка отображения файла в память (mmap)");
         close(fd);
-        return 1;
+        return EXIT_FAILURE;
     }
 
-    for (off_t i = 0; i < file_size; i++)
+    // дескриптор файла больше не нужен после выполнения mmap
+    close(fd);
+
+    // сохраняем глобальные указатели для обработчика сигнала
+    global_file_map = file_map;
+    global_file_size = st.st_size;
+
+    // настраиваем обработчик сигнала SIGALRM
+    struct sigaction sa;
+    sa.sa_handler = handle_alarm;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0; // прерываем блокирующий ввод (scanf)
+    if (sigaction(SIGALRM, &sa, NULL) == -1) 
     {
-        if (file_data[i] == '\n')
+        perror("Ошибка установки обработчика сигнала");
+        munmap(file_map, st.st_size);
+        return EXIT_FAILURE;
+    }
+
+    // построение таблицы строк
+    size_t capacity = INITIAL_CAPACITY;
+    size_t line_count = 0;
+    LineInfo *table = malloc(capacity * sizeof(LineInfo));
+    if (!table) 
+    {
+        perror("Ошибка выделения памяти");
+        munmap(file_map, st.st_size);
+        return EXIT_FAILURE;
+    }
+
+    // первая строка начинается с самого первого байта в отображенной памяти
+    table[0].line_start = file_map;
+    table[0].length = 0;
+
+    // обходим отображенную область как обычный массив в памяти
+    for (off_t i = 0; i < st.st_size; i++) 
+    {
+        table[line_count].length++;
+
+        if (file_map[i] == '\n') 
         {
-            lines[cnt].offset = line_start;
-            lines[cnt].length = i - line_start + 1; 
+            line_count++;
 
-            cnt++;
-            line_start = i + 1;
+            if (line_count >= capacity) 
+            {
+                capacity *= 2;
+                LineInfo *temp = realloc(table, capacity * sizeof(LineInfo));
+                if (!temp) 
+                {
+                    perror("Ошибка перераспределения памяти");
+                    free(table);
+                    munmap(file_map, st.st_size);
+                    return EXIT_FAILURE;
+                }
+                table = temp;
+            }
 
-            if (cnt >= MAX_LINES) break;
+            // следующая строка начинается со следующего за '\n' байта
+            table[line_count].line_start = &file_map[i + 1];
+            table[line_count].length = 0;
         }
     }
 
-    if (line_start < file_size && cnt < MAX_LINES)
+    // если последний символ файла не был '\n', учтем последнюю строку
+    if (table[line_count].length > 0) 
     {
-        lines[cnt].offset = line_start;
-        lines[cnt].length = file_size - line_start;
-        cnt++;
+        line_count++;
     }
 
-    printf("\nТаблица строк:\n");
-    printf("Строка\tОтступ\tДлина\n");
-    for (int i = 0; i < cnt; i++)
+    // отладочный вывод таблицы отступов и длин
+    printf("=== Таблица отступов и длин строк (mmap) ===\n");
+    printf("%-8s | %-12s | %-10s\n", "Строка", "Смещение (B)", "Длина (B)");
+    printf("--------------------------------------------\n");
+    for (size_t i = 0; i < line_count; i++) 
     {
-        printf("%d\t%lld\t%lld\n",
-            i + 1,
-            (long long)lines[i].offset,
-            (long long)lines[i].length
-        );
+        // смещение вычисляется арифметикой указателей (line_start - file_map)
+        off_t offset = table[i].line_start - file_map;
+        printf("%-8zu | %-12ld | %-10zu\n", i + 1, (long)offset, table[i].length);
     }
+    printf("============================================\n\n");
 
-    long number;
-    printf("\nВведите номер строки (у вас 5 секунд): ");
-    fflush(stdout);
-    
-    // Заводим таймер ровно ОДИН раз перед вводом
+    // цикл запроса (5 секунд только на первый ввод)
+    int line_num;
+    int first_input = 1; // Флаг первого ввода
+
+    // запускаем таймер на 5 секунд строго ОДИН РАЗ перед началом работы с вводом
     alarm(5);
 
-    if (scanf("%ld", &number) != 1)
-    {
-        alarm(0); // Гасим будильник, если ввели некорректные символы
-        printf("Ошибка: введите целое число!\n");
-        munmap(file_data, file_size);
-        close(fd);
-        return 1;
-    }
+    while (1) {
+        if (first_input) 
+        {
+            printf("У вас есть 5 секунд на первый ввод номера строки (1-%zu, 0 для выхода): ", line_count);
+        } 
+        else 
+        {
+            printf("Введите номер строки (1-%zu, 0 для выхода): ", line_count);
+        }
+        fflush(stdout);
 
-    // Пользователь успел набрать число и нажать Enter -> УБИВАЕМ БУДИЛЬНИК НАВСЕГДА
-    alarm(0);
+        int result = scanf("%d", &line_num);
 
-    if (number < 1 || number > cnt)
-    {
-        printf("Строки с таким номером не существует. Доступно: 1..%d\n", cnt);
-    }
-    else 
-    {
-        printf("Строка %ld: %.*s", 
-               number, 
-               (int)lines[number - 1].length, 
-               file_data + lines[number - 1].offset);
-        
-        if (file_data[lines[number - 1].offset + lines[number - 1].length - 1] != '\n')
+        // отменяем таймер сразу после первого ввода
+        if (first_input) 
+        {
+            alarm(0);
+            first_input = 0;
+        }
+
+        if (result != 1) 
+        {
+            printf("Некорректный ввод. Попробуйте еще раз.\n");
+            while (getchar() != '\n');
+            continue;
+        }
+
+        if (line_num == 0) 
+        {
+            printf("Завершение работы.\n");
+            break;
+        }
+
+        if (line_num < 1 || (size_t)line_num > line_count) 
+        {
+            printf("Ошибка: строки с номером %d не существует.\n", line_num);
+            continue;
+        }
+
+        size_t idx = line_num - 1;
+        const char *start = table[idx].line_start;
+        size_t len = table[idx].length;
+
+        // вывод строки через printf(3) без лишних копирований
+        printf("Строка %d: %.*s", line_num, (int)len, start);
+        if (len > 0 && start[len - 1] != '\n') 
         {
             printf("\n");
         }
     }
 
-    // Программа сделала один единственный запрос и успешно завершает работу
-    munmap(file_data, file_size);
-    close(fd);
-    return 0;
+    // освобождение ресурсов
+    free(table);
+    munmap(file_map, st.st_size);
+
+    return EXIT_SUCCESS;
 }
