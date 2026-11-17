@@ -1,4 +1,4 @@
-/* 10.c — запуск команды в порожденном процессе и печать её кода завершения */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -20,14 +20,12 @@ int main(int argc, char *argv[])
             perror("fork");
             exit(EXIT_FAILURE);
 
-        case 0:                     /* порожденный процесс */
-            /* argv[1] — команда, argv[1..argc-1] — её аргументы;
-               argv[argc] == NULL по стандарту, это нужно execvp */
+        case 0:                     
             execvp(argv[1], &argv[1]);
-            perror("execvp");       /* попадём сюда только при ошибке */
+            perror("execvp");      
             _exit(127);
 
-        default:                    /* родитель */
+        default:                   
             if (waitpid(pid, &status, 0) == -1) {
                 perror("waitpid");
                 exit(EXIT_FAILURE);
